@@ -1,0 +1,43 @@
+# ── secrets (.env holds REAL credentials; only the *.example templates are committed) ──
+.env
+.env.*
+!.env.example
+!.env.*.example
+# one-off local secrets: first Super Admin password (go-live step), demo sign-ins (seed), anything *.secret.local
+.superadmin-initial-password.local
+.demo-credentials.local
+*.secret.local
+*.local
+# Firebase / Google service-account JSON and keys never belong in the repo (Render takes them base64-encoded)
+*service-account*.json
+*.pem
+*.key
+# ── dependencies / builds (incl. the vendored shared/ package's node_modules and dist) ──
+node_modules/
+dist/
+build/
+coverage/
+shared/node_modules/
+shared/dist/
+*.tsbuildinfo
+# local file storage driver (STORAGE_DRIVER=local)
+storage/
+# ── logs ──
+logs/
+*.log
+npm-debug.log*
+# ── OS / editor / tool state ──
+.DS_Store
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+.wf-*
+**/README.local.md
+# ── defence in depth (formerly covered by the monorepo's root .gitignore) ──
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+*.apk
+*.aab

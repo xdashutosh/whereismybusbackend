@@ -1,0 +1,112 @@
+# Where Is My Bus — backend CI (BP §17: lint → typecheck → tests → tenant isolation tests → migration
+# dry-run → build). This repository is the backend: every path below is relative to its root.
+# Deploys are not done here: Render deploys from the default branch on its own (render.yaml: one native
+# Node web service, no Docker, no Redis) once this workflow is green.
+# Check this file after editing it: node scripts/check-render-config.mjs (it also validates ci.yml).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24.11.1 # same as NODE_VERSION in render.yaml
+
+jobs:
+  deploy-config:
+    name: Deploy config (render.yaml, ci.yml, no Docker files)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # No npm install: the script falls back to Ruby's YAML parser (preinstalled on ubuntu-latest).
+      - run: node scripts/check-render-config.mjs
+      - run: node scripts/check-render-config.mjs --self-test
+      - name: Load-test helpers (Socket.IO framing used by the k6 script)
+        run: node --test scripts/load/sio.test.js
+
+  shared:
+    name: shared/ (@wimb/shared typecheck, unit tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: shared
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: shared/package-lock.json
+      # Standalone install from shared/'s own lockfile (the vendored package must build on its own too).
+      - run: npm ci --include=dev --ignore-scripts
+      # Source + tests (tsconfig.test.json); the build itself excludes src/**/*.test.ts.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  backend:
+    name: Backend (lint, typecheck, isolation + full tests, migration dry-run, build, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        # Production runs Neon PostgreSQL 18; tests need PostGIS, pgcrypto, citext, btree_gist.
+        image: postgis/postgis:18-3.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Tests refuse any database whose name lacks "test" or whose host is not local; globalSetup
+      # creates it, applies every migration as the owner and provisions the NOBYPASSRLS app role.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/whereismybus_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # Same as the Render buildCommand: shared/'s dev dependencies come with ours; postinstall builds it.
+      - run: npm ci --include=dev
+      - run: npm run lint
+      - run: npm run typecheck
+      - name: Tenant isolation + RLS tests (BP §4.9; fail fast)
+        run: npm test -- tests/integration.isolation.test.ts tests/schema.rls.test.ts tests/db.tenant.test.ts
+      - name: Full test suite
+        run: npm test
+      - name: Migration dry-run (empty database, then a no-op second run)
+        env:
+          NODE_ENV: development
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/whereismybus_ci_migrate
+          DATABASE_APP_URL: postgresql://postgres:postgres@localhost:5432/whereismybus_ci_migrate
+          STORAGE_DRIVER: local
+          SMS_PROVIDER: console
+        run: |
+          psql postgresql://postgres:postgres@localhost:5432/postgres -v ON_ERROR_STOP=1 -c 'create database whereismybus_ci_migrate'
+          npm run migrate
+          npm run migrate
+          npm run migrate:status
+      - run: npm run build
+      - name: Audit production dependencies
+        run: npm audit --omit=dev

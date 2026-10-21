@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "k6 load tests (ingest + Socket.IO fan-out). Not an npm package: k6 runs the scripts, node --test runs sio.test.js. See docs/OPERATIONS.md §4."
+}

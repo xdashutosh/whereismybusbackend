@@ -1,0 +1,158 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Where Is My Bus: Render Blueprint, the backend API as ONE native Node web service.
+# No Docker, no Redis/Key Value, no worker: SINGLE_INSTANCE=true runs live state, rate limits,
+# Socket.IO and the job scheduler inside this one process (keep exactly one instance).
+#
+# This file sits at the root of the backend repo (no rootDir: the repo root IS the backend).
+# Deploy: the "Deploy to Render" button in README.md, or Render Dashboard → New → Blueprint → this
+# repo. Render asks once for every `sync: false` value below: paste them from .env.render.local
+# ("Add from .env"). Guide: docs/DEPLOY_VERCEL_RENDER.md. Check after editing:
+#   node scripts/check-render-config.mjs
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  - type: web
+    name: whereismybus-api
+    runtime: node
+    # Next to Neon (AWS us-east-1).
+    region: virginia
+    # Always on. The Free plan also works (it sleeps when idle, and has no pre-deploy step, which is
+    # why migrations run in startCommand below).
+    plan: starter
+    # SINGLE_INSTANCE: in-process state, so never scale this service out.
+    numInstances: 1
+    # No rootDir: this repo is self-contained (shared/ is vendored and built by postinstall/prebuild).
+    # --include=dev: TypeScript is a dev dependency and NODE_ENV=production would skip it.
+    buildCommand: npm ci --include=dev && npm run build
+    # release = migrate → db:setup-roles → db:bootstrap (idempotent, a few seconds when nothing is
+    # pending), then the API starts. A failed release never starts the new version.
+    startCommand: npm run release && npm start
+    # Liveness only (no I/O). /readyz (database + migrations) is for monitoring.
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # ── Runtime ──
+      - key: NODE_VERSION
+        value: 24.11.1
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Trust only Render's own proxy (1 hop) for client IPs; more would let callers spoof X-Forwarded-For.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: DEFAULT_TIMEZONE
+        value: Asia/Kolkata
+
+      # ── Single instance (no Redis): jobs run in this process ──
+      - key: JOBS_IN_PROCESS
+        value: "true"
+      - key: SINGLE_INSTANCE
+        value: "true"
+
+      # ── Neon PostgreSQL: the seeded demo database ──
+      # Owner role (migrations, db:setup-roles, db:bootstrap); use the -pooler host from .env.
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: "5432"
+      - key: DB_NAME
+        value: whereismybus_dev
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: DB_POOL_MAX
+        value: "10"
+      # Runtime app role (LOGIN NOBYPASSRLS, created/aligned by db:setup-roles): same values as .env.
+      - key: DB_APP_USER
+        sync: false
+      - key: DB_APP_PASSWORD
+        sync: false
+
+      # ── Linode Object Storage (private bucket; the API hands out presigned URLs only) ──
+      - key: STORAGE_DRIVER
+        value: s3
+      - key: S3_PROVIDER
+        value: linode
+      - key: AWS_REGION
+        value: in-maa-1
+      - key: S3_ENDPOINT
+        value: https://in-maa-1.linodeobjects.com
+      - key: S3_KEY_PREFIX
+        value: whereismybus/
+      - key: AWS_BUCKET_NAME
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+
+      # ── Auth ──
+      # Not generated: local development and Render share the demo database, and TOTP secrets are
+      # encrypted with a key derived from this value, so it must equal JWT_ACCESS_SECRET in .env.
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: ACCESS_TOKEN_TTL
+        value: 15m
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: "30"
+      - key: TOTP_ISSUER
+        value: Where Is My Bus
+
+      # ── SMS (parent OTP): WebPay Services, OTP route ──
+      - key: SMS_PROVIDER
+        value: webpayservices
+      - key: SMS_API_URL
+        sync: false
+      - key: SMS_API_USERNAME
+        sync: false
+      - key: SMS_API_KEY
+        sync: false
+      - key: SMS_SENDER_ID
+        sync: false
+      - key: SMS_ROUTE
+        value: OTP
+      - key: SMS_DLT_TEMPLATE_ID
+        sync: false
+      # Must equal the DLT-registered template text exactly ({otp} = the code).
+      - key: SMS_OTP_MESSAGE
+        sync: false
+      - key: SMS_OTP_EXPIRY_MIN
+        value: "10"
+      - key: SMS_OTP_MAX_ATTEMPTS
+        value: "5"
+      - key: SMS_OTP_RESEND_SECONDS
+        value: "60"
+      - key: SMS_OTP_DAILY_CAP
+        value: "10"
+      - key: SMS_OTP_GLOBAL_DAILY_CAP
+        value: "2000"
+      - key: SMS_LOW_BALANCE_THRESHOLD
+        value: "500"
+      # Demo mode: only SMS_DEV_ALLOWED_NUMBERS get a real SMS; the OTP of any other number is written
+      # to the Render log. Set SMS_ALLOWLIST_ONLY=false to send to every parent.
+      - key: SMS_ALLOWLIST_ONLY
+        value: "true"
+      # Comma-separated, e.g. +919812345678,+919900000001
+      - key: SMS_DEV_ALLOWED_NUMBERS
+        sync: false
+
+      # ── Web app (Vercel) ──
+      # Admin panel origin(s), comma-separated, no trailing slash, e.g. https://your-admin.vercel.app
+      - key: CORS_ORIGINS
+        sync: false
+      # Public URL of the admin panel (used in e-mailed sign-in links).
+      - key: APP_PUBLIC_URL
+        sync: false
+      # Super Admin e-mail for db:bootstrap (production refuses superadmin@example.com). The demo
+      # database already has Super Admins; a new e-mail also needs PLATFORM_ADMIN_INITIAL_PASSWORD.
+      - key: PLATFORM_ADMIN_EMAIL
+        sync: false
+
+      # ── Google Routes API (server key; empty = straight-line route fallback) ──
+      - key: GOOGLE_MAPS_SERVER_KEY
+        sync: false
